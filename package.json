@@ -73,7 +73,7 @@
   },
   "dependencies": {
     "commander": "^13.1.0",
-    "undici": "^7.29.0"
+    "undici": "^8.12.3"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.7",
