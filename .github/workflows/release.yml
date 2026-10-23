@@ -1,0 +1,78 @@
+name: release
+
+# Publishes to npm and creates the GitHub release when a version tag is pushed
+# (e.g. v3.4.0). Verifies first, then publishes with provenance. This is the
+# single publisher: `pnpm release` only prepares and pushes the tag, it does not
+# publish, so there is no second process racing this one.
+#
+# PREREQUISITE (cannot be done from this repo): npm-side trusted publishing must
+# be enabled once, by hand, before this workflow can publish without a token.
+# On npmjs.com, open the @liustack/modsearch package settings and add a Trusted
+# Publisher pointing at this repository and this workflow file (.github/workflows/
+# release.yml). With that in place, the id-token permission below lets npm mint a
+# short-lived OIDC credential, so no NPM_TOKEN secret is needed and --provenance
+# attaches a verifiable build attestation.
+#
+# If you have not set up trusted publishing yet, add an NPM_TOKEN secret and set
+# `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}` on the publish step instead.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # required to create the GitHub release
+  id-token: write # required for npm provenance / trusted publishing
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+      # OIDC trusted publishing needs npm 11.5.1+, newer than what Node 22
+      # ships with. pnpm publish cannot do the OIDC token exchange at all: the
+      # 4.1.0 first attempt signed provenance fine and then got a masked 404 on
+      # the registry PUT because the request carried no credential.
+      - run: npm install -g npm@11
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      # Idempotent: a manual publish (e.g. during a registry or Actions
+      # incident) must not turn this run red when the tag arrives later.
+      - name: Publish to npm (skipped when the version is already live)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').name")"
+          if npm view "$PKG@$VERSION" version >/dev/null 2>&1; then
+            echo "$PKG@$VERSION is already on the registry; skipping publish."
+          else
+            npm publish --provenance --access public
+          fi
+      - name: Build release notes from CHANGELOG
+        run: >
+          node --input-type=module -e "
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { changelogSection } from './scripts/changelog.mjs';
+          const version = process.env.GITHUB_REF_NAME.replace(/^v/, '');
+          const notes = changelogSection(readFileSync('CHANGELOG.md', 'utf-8'), version) ?? '';
+          writeFileSync('RELEASE_NOTES.md', notes);
+          "
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; skipping."
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
+          fi
